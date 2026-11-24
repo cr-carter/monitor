@@ -46,13 +46,20 @@
 #define PIPE_WRITE 1
 
 // Sleep system call
-#define SLEEP_INTERVAL 1
+#define SLEEP_INTERVAL 5
+
+// Maximum line buffer size (including null terminator)
+#define MAX_LINE_LEN 256
 
 // Set to 1 when the parent receives SIGINT (Ctrl+C) so the loop can wind down cleanly
 volatile sig_atomic_t interrupt_flag = 0;
 
-// Maximum line buffer size (including null terminator)
-#define MAX_LINE_LEN 256
+// Static functions
+static void do_uptime(int uptime_pipe_fd[2]);
+static void do_free(int free_pipe_fd[2], int uptime_pipe_fd[2]);
+static void do_df(int df_pipe_fd[2], int uptime_pipe_fd[2], int free_pipe_fd[2]);
+static void do_ps(int ps_pipe_fd[2], int uptime_pipe_fd[2], int free_pipe_fd[2], int df_pipe_fd[2]);
+static void do_head(int head_pipe_fd[2], int ps_pipe_fd[2]);
 
 /**
  * @brief Async-signal-safe handler for SIGINT in the parent process.
@@ -64,6 +71,27 @@ static void parent_sigint_handler(int sig)
     {
         interrupt_flag = 1;
     }
+}
+
+/**
+ * Helper to close file descriptors
+ */
+static void close_fd(int fd)
+{
+    if (-1 == close(fd))
+    {
+        perror("close");
+        _exit(EXIT_CLOSE_FAILURE);
+    }
+}
+
+/**
+ * Helper to close pipe
+ */
+static void close_pipe(int pipe_fd[2])
+{
+    close_fd(pipe_fd[PIPE_READ]);
+    close_fd(pipe_fd[PIPE_WRITE]);
 }
 
 /**
@@ -84,12 +112,7 @@ static void do_uptime(int uptime_pipe_fd[2])
     fflush(stdout);
 
     // Child only writes to the pipe; close the unused fd immediately
-    if (-1 == close(uptime_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    printf("'uptime' captured (PID %d).\n", (int)getpid());
+    close_fd(uptime_pipe_fd[PIPE_READ]);
 
     // Duplicate pipe write to stdout
     if (-1 == dup2(uptime_pipe_fd[PIPE_WRITE], STDOUT_FILENO))
@@ -97,10 +120,13 @@ static void do_uptime(int uptime_pipe_fd[2])
         perror("close");
         _exit(EXIT_DUP2_FAILURE);
     }
+    close_fd(uptime_pipe_fd[PIPE_WRITE]);
 
     char *args[] = {(char *)"uptime", NULL};
     execvp("uptime", args);
+
     perror("execv failed");
+    _exit(EXIT_FAILURE);
 }
 
 /**
@@ -121,23 +147,8 @@ static void do_free(int free_pipe_fd[2], int uptime_pipe_fd[2])
     fflush(stdout);
 
     // Child only writes to the pipe; close the unused fd immediately
-    if (-1 == close(free_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(uptime_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(uptime_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-
-    printf("'free -b' captured (PID %d).\n", (int)getpid());
+    close_fd(free_pipe_fd[PIPE_READ]);
+    close_pipe(uptime_pipe_fd);
 
     // Duplicate pipe write to stdout
     if (-1 == dup2(free_pipe_fd[PIPE_WRITE], STDOUT_FILENO))
@@ -145,10 +156,13 @@ static void do_free(int free_pipe_fd[2], int uptime_pipe_fd[2])
         perror("close");
         _exit(EXIT_DUP2_FAILURE);
     }
+    close_fd(free_pipe_fd[PIPE_WRITE]);
 
     char *args[] = {(char *)"free", (char *)"-b", NULL};
     execvp("free", args);
+
     perror("execv failed");
+    _exit(EXIT_FAILURE);
 }
 
 /**
@@ -169,33 +183,9 @@ static void do_df(int df_pipe_fd[2], int uptime_pipe_fd[2], int free_pipe_fd[2])
     fflush(stdout);
 
     // Child only writes to the pipe; close the unused fd immediately
-    if (-1 == close(df_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(uptime_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(uptime_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(free_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(free_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-
-    printf("'df -B1 /' captured (PID %d).\n", (int)getpid());
+    close_fd(df_pipe_fd[PIPE_READ]);
+    close_pipe(uptime_pipe_fd);
+    close_pipe(free_pipe_fd);
 
     // Duplicate pipe write to stdout
     if (-1 == dup2(df_pipe_fd[PIPE_WRITE], STDOUT_FILENO))
@@ -203,10 +193,13 @@ static void do_df(int df_pipe_fd[2], int uptime_pipe_fd[2], int free_pipe_fd[2])
         perror("close");
         _exit(EXIT_DUP2_FAILURE);
     }
+    close_fd(df_pipe_fd[PIPE_WRITE]);
 
     char *args[] = {(char *)"df", (char *)"-B1", (char *)"/", NULL};
     execvp("df", args);
+
     perror("execv failed");
+    _exit(EXIT_FAILURE);
 }
 
 /**
@@ -227,55 +220,90 @@ static void do_ps(int ps_pipe_fd[2], int uptime_pipe_fd[2], int free_pipe_fd[2],
     fflush(stdout);
 
     // Child only writes to the pipe; close the unused fd immediately
-    if (-1 == close(ps_pipe_fd[PIPE_READ]))
+    close_fd(ps_pipe_fd[PIPE_READ]);
+    close_pipe(uptime_pipe_fd);
+    close_pipe(free_pipe_fd);
+    close_pipe(df_pipe_fd);
+
+    int head_pipe_fd[2] = {-1, -1};
+    // Create the unnamed pipe; O_CLOEXEC ensures descriptors close if exec() is ever used
+    if (-1 == pipe2(head_pipe_fd, O_CLOEXEC))
     {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(uptime_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(uptime_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(free_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(free_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(df_pipe_fd[PIPE_READ]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
-    }
-    if (-1 == close(df_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-        _exit(EXIT_CLOSE_FAILURE);
+        perror("pipe2");
+        _exit(EXIT_PIPE_FAILURE);
     }
 
-    printf("'ps -eo pid,comm,%%cpu,%%mem --sort=-%%cpu | head' captured (PID %d).\n", (int)getpid());
+    // Create the head child
+    pid_t head_pid = fork();
 
-    // Duplicate pipe write to stdout
-    if (-1 == dup2(ps_pipe_fd[PIPE_WRITE], STDOUT_FILENO))
+    if (-1 == head_pid)
     {
-        perror("close");
+        perror("fork");
+
+        // Clean up both pipe ends since no child exists to share them
+        close_pipe(head_pipe_fd);
+
+        _exit(EXIT_FAILURE);
+    }
+    if (0 == head_pid)
+    {
+        // Child executes exits via _exit()
+        do_head(head_pipe_fd, ps_pipe_fd);
+
+        // Defensive fallback: child functions should not return.
+        _exit(EXIT_FAILURE);
+    }
+
+    // PS does not need these
+    close_fd(head_pipe_fd[PIPE_READ]);
+    if (-1 == dup2(head_pipe_fd[PIPE_WRITE], STDOUT_FILENO))
+    {
+        perror("dup2");
         _exit(EXIT_DUP2_FAILURE);
     }
 
+    close_fd(head_pipe_fd[PIPE_WRITE]);
+
     char *args[] = {(char *)"ps", (char *)"-eo", (char *)"pid,comm,%cpu,%mem", (char *)"--sort=-%cpu", NULL};
-    //"| ", "head"
     execvp("ps", args);
+
     perror("execv failed");
+    _exit(EXIT_FAILURE);
+}
+
+/**
+ * Helper for ps, used to pass ps results into head
+ */
+static void do_head(int head_pipe_fd[2], int ps_pipe_fd[2])
+{
+    // Head does not write into it's own pipe
+    close_fd(head_pipe_fd[PIPE_WRITE]);
+
+    // Head reads from ps
+    if (-1 == dup2(head_pipe_fd[PIPE_READ], STDIN_FILENO))
+    {
+        perror("dup2");
+        _exit(EXIT_DUP2_FAILURE);
+    }
+
+    // Close original descriptor after duplication.
+    close_fd(head_pipe_fd[PIPE_READ]);
+
+    // Head writes to the original parent's pipe
+    if (-1 == dup2(ps_pipe_fd[PIPE_WRITE], STDOUT_FILENO))
+    {
+        perror("dup2");
+        _exit(EXIT_DUP2_FAILURE);
+    }
+
+    // Close original descriptor after duplication
+    close_fd(ps_pipe_fd[PIPE_WRITE]);
+
+    char *args[] = {(char *)"head", (char *)"-n", (char *)"4", NULL};
+    execvp("head", args);
+
+    perror("execvp head");
+    _exit(EXIT_FAILURE);
 }
 
 /**
@@ -288,26 +316,14 @@ static int do_parent(int uptime_pid, int uptime_pipe_fd[2], int free_pid, int fr
 {
     int retval = EXIT_SUCCESS;
 
-    printf("I am the parent (PID %d). (Ctrl+C to quit)\n", (int)getpid());
+    printf("I am the parent (PID %d). (Ctrl+C to quit)\n\n", (int)getpid());
     fflush(stdout);
 
     // Parent only reads to the pipe; close the unused fd immediately
-    if (-1 == close(uptime_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-    }
-    if (-1 == close(free_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-    }
-    if (-1 == close(df_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-    }
-    if (-1 == close(ps_pipe_fd[PIPE_WRITE]))
-    {
-        perror("close");
-    }
+    close_fd(uptime_pipe_fd[PIPE_WRITE]);
+    close_fd(free_pipe_fd[PIPE_WRITE]);
+    close_fd(df_pipe_fd[PIPE_WRITE]);
+    close_fd(ps_pipe_fd[PIPE_WRITE]);
 
     int status;
 
@@ -325,6 +341,7 @@ static int do_parent(int uptime_pid, int uptime_pipe_fd[2], int free_pid, int fr
         perror("waitpid");
         retval = EXIT_FAILURE;
     }
+    puts("");
 
     // Setup and call free
     pipe_stream = fdopen(free_pipe_fd[PIPE_READ], "r");
@@ -338,6 +355,7 @@ static int do_parent(int uptime_pid, int uptime_pipe_fd[2], int free_pid, int fr
         perror("waitpid");
         retval = EXIT_FAILURE;
     }
+    puts("");
 
     // Setup and call df
     pipe_stream = fdopen(df_pipe_fd[PIPE_READ], "r");
@@ -351,6 +369,7 @@ static int do_parent(int uptime_pid, int uptime_pipe_fd[2], int free_pid, int fr
         perror("waitpid");
         retval = EXIT_FAILURE;
     }
+    puts("");
 
     // Setup and call ps
     pipe_stream = fdopen(ps_pipe_fd[PIPE_READ], "r");
@@ -364,6 +383,7 @@ static int do_parent(int uptime_pid, int uptime_pipe_fd[2], int free_pid, int fr
         perror("waitpid");
         retval = EXIT_FAILURE;
     }
+    puts("");
 
     return retval;
 }
@@ -406,7 +426,7 @@ int main()
         }
 
         // system("clear");
-        printf("Iteration %d\n", i);
+        printf("\nIteration %d\n", i);
 
         // Create the unnamed pipe; O_CLOEXEC ensures descriptors close if exec() is ever used
         if (-1 == pipe2(uptime_pipe_fd, O_CLOEXEC))
@@ -426,18 +446,16 @@ int main()
             perror("fork");
 
             // Clean up both pipe ends since no child exists to share them
-            close(uptime_pipe_fd[PIPE_READ]);
-            close(uptime_pipe_fd[PIPE_WRITE]);
+            close_pipe(uptime_pipe_fd);
 
             return EXIT_FAILURE;
         }
         if (0 == uptime_pid)
         {
+            printf("'uptime' captured (PID %d).\n", (int)getpid());
+
             // Child executes exits via _exit()
             do_uptime(uptime_pipe_fd);
-
-            // Defensive fallback: child functions should not return.
-            _exit(EXIT_FAILURE);
         }
 
         // Create the unnamed pipe; O_CLOEXEC ensures descriptors close if exec() is ever used
@@ -455,18 +473,16 @@ int main()
             perror("fork");
 
             // Clean up both pipe ends since no child exists to share them
-            close(free_pipe_fd[PIPE_READ]);
-            close(free_pipe_fd[PIPE_WRITE]);
+            close_pipe(free_pipe_fd);
 
             return EXIT_FAILURE;
         }
         if (0 == free_pid)
         {
+            printf("'free -b' captured (PID %d).\n", (int)getpid());
+
             // Child executes exits via _exit()
             do_free(free_pipe_fd, uptime_pipe_fd);
-
-            // Defensive fallback: child functions should not return.
-            _exit(EXIT_FAILURE);
         }
 
         // Create the unnamed pipe; O_CLOEXEC ensures descriptors close if exec() is ever used
@@ -484,18 +500,16 @@ int main()
             perror("fork");
 
             // Clean up both pipe ends since no child exists to share them
-            close(df_pipe_fd[PIPE_READ]);
-            close(df_pipe_fd[PIPE_WRITE]);
+            close_pipe(df_pipe_fd);
 
             return EXIT_FAILURE;
         }
         if (0 == df_pid)
         {
+            printf("'df -B1 /' captured (PID %d).\n", (int)getpid());
+
             // Child executes exits via _exit()
             do_df(df_pipe_fd, uptime_pipe_fd, free_pipe_fd);
-
-            // Defensive fallback: child functions should not return.
-            _exit(EXIT_FAILURE);
         }
 
         // Create the unnamed pipe; O_CLOEXEC ensures descriptors close if exec() is ever used
@@ -513,18 +527,16 @@ int main()
             perror("fork");
 
             // Clean up both pipe ends since no child exists to share them
-            close(ps_pipe_fd[PIPE_READ]);
-            close(ps_pipe_fd[PIPE_WRITE]);
+            close_pipe(ps_pipe_fd);
 
             return EXIT_FAILURE;
         }
         if (0 == ps_pid)
         {
+            printf("'ps -eo pid,comm,%%cpu,%%mem --sort=-%%cpu | head -n 4' captured (PID %d).\n", (int)getpid());
+
             // Child executes exits via _exit()
             do_ps(ps_pipe_fd, uptime_pipe_fd, free_pipe_fd, df_pipe_fd);
-
-            // Defensive fallback: child functions should not return.
-            _exit(EXIT_FAILURE);
         }
 
         sleep(SLEEP_INTERVAL);
@@ -533,8 +545,8 @@ int main()
         retval = do_parent(uptime_pid, uptime_pipe_fd, free_pid, free_pipe_fd, df_pid, df_pipe_fd, ps_pid, ps_pipe_fd);
     }
 
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
+    close_fd(STDIN_FILENO);
+    close_fd(STDOUT_FILENO);
+    close_fd(STDERR_FILENO);
     return retval;
 }
