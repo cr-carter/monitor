@@ -27,6 +27,7 @@
  */
 #define _GNU_SOURCE
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -92,6 +93,56 @@ static void close_pipe(int pipe_fd[2])
 {
     close_fd(pipe_fd[PIPE_READ]);
     close_fd(pipe_fd[PIPE_WRITE]);
+}
+
+static int print_output(int command_pid, int command_pipe_read)
+{
+    int status = 0;
+    FILE *pipe_stream = fdopen(command_pipe_read, "r");
+    if (NULL == pipe_stream)
+    {
+        perror("fdopen");
+        close_fd(command_pipe_read);
+        return EXIT_FAILURE;
+    }
+
+    char line[MAX_LINE_LEN];
+
+    while (NULL != fgets(line, sizeof(line), pipe_stream))
+    {
+        printf("%s", line);
+    }
+
+    if (ferror(pipe_stream))
+    {
+        perror("fgets");
+        fclose(pipe_stream);
+        return EXIT_FAILURE;
+    }
+
+    fclose(pipe_stream);
+
+    pid_t result;
+
+    do
+    {
+        result = waitpid(command_pid, &status, 0);
+    } while (-1 == result && EINTR == errno);
+
+    if (-1 == result)
+    {
+        perror("waitpid");
+        return EXIT_FAILURE;
+    }
+    else if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS)
+    {
+        fprintf(stderr, "Command (PID %d) failed\n", command_pid);
+        return EXIT_FAILURE;
+    }
+
+    puts("");
+
+    return status;
 }
 
 /**
@@ -325,65 +376,29 @@ static int do_parent(int uptime_pid, int uptime_pipe_fd[2], int free_pid, int fr
     close_fd(df_pipe_fd[PIPE_WRITE]);
     close_fd(ps_pipe_fd[PIPE_WRITE]);
 
-    int status;
-
     // Setup and call uptime
-    FILE *pipe_stream = fdopen(uptime_pipe_fd[PIPE_READ], "r");
-    char line[MAX_LINE_LEN];
-
-    while (fgets(line, sizeof(line), pipe_stream) != NULL)
+    if (EXIT_SUCCESS != print_output(uptime_pid, uptime_pipe_fd[PIPE_READ]))
     {
-        printf("%s", line);
-    }
-    fclose(pipe_stream);
-    if (-1 == waitpid(uptime_pid, &status, 0))
-    {
-        perror("waitpid");
         retval = EXIT_FAILURE;
     }
-    puts("");
 
     // Setup and call free
-    pipe_stream = fdopen(free_pipe_fd[PIPE_READ], "r");
-    while (fgets(line, sizeof(line), pipe_stream) != NULL)
+    if (EXIT_SUCCESS != print_output(free_pid, free_pipe_fd[PIPE_READ]))
     {
-        printf("%s", line);
-    }
-    fclose(pipe_stream);
-    if (-1 == waitpid(free_pid, &status, 0))
-    {
-        perror("waitpid");
         retval = EXIT_FAILURE;
     }
-    puts("");
 
     // Setup and call df
-    pipe_stream = fdopen(df_pipe_fd[PIPE_READ], "r");
-    while (fgets(line, sizeof(line), pipe_stream) != NULL)
+    if (EXIT_SUCCESS != print_output(df_pid, df_pipe_fd[PIPE_READ]))
     {
-        printf("%s", line);
-    }
-    fclose(pipe_stream);
-    if (-1 == waitpid(df_pid, &status, 0))
-    {
-        perror("waitpid");
         retval = EXIT_FAILURE;
     }
-    puts("");
 
     // Setup and call ps
-    pipe_stream = fdopen(ps_pipe_fd[PIPE_READ], "r");
-    while (fgets(line, sizeof(line), pipe_stream) != NULL)
+    if (EXIT_SUCCESS != print_output(ps_pid, ps_pipe_fd[PIPE_READ]))
     {
-        printf("%s", line);
-    }
-    fclose(pipe_stream);
-    if (-1 == waitpid(ps_pid, &status, 0))
-    {
-        perror("waitpid");
         retval = EXIT_FAILURE;
     }
-    puts("");
 
     return retval;
 }
@@ -417,14 +432,6 @@ int main()
 
     for (int i = 0;; i++)
     {
-        if (1 == interrupt_flag)
-        {
-            printf("\n\n******************************\n\n");
-            printf("Caught Ctrl+C\n");
-            printf("\n******************************\n\n\n");
-            break;
-        }
-
         // system("clear");
         printf("\nIteration %d\n", i);
 
@@ -539,10 +546,18 @@ int main()
             do_ps(ps_pipe_fd, uptime_pipe_fd, free_pipe_fd, df_pipe_fd);
         }
 
-        sleep(SLEEP_INTERVAL);
-
         // Parent drives input, signaling, acknowledgment, and waitpid() cleanup
         retval = do_parent(uptime_pid, uptime_pipe_fd, free_pid, free_pipe_fd, df_pid, df_pipe_fd, ps_pid, ps_pipe_fd);
+
+        if (1 == interrupt_flag)
+        {
+            printf("\n\n******************************\n\n");
+            printf("Caught Ctrl+C\n");
+            printf("\n******************************\n\n\n");
+            break;
+        }
+
+        sleep(SLEEP_INTERVAL);
     }
 
     close_fd(STDIN_FILENO);
@@ -550,3 +565,5 @@ int main()
     close_fd(STDERR_FILENO);
     return retval;
 }
+
+/* End of file monitor.c */
